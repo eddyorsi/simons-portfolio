@@ -1,0 +1,606 @@
+from tkinter import *
+from tkinter.filedialog import askopenfilename
+import pandas as pd
+from gspread_pandas import Spread
+import os
+from pathlib import Path
+import re
+import textract
+
+
+class SampleApp(Tk):
+    def __init__(self):
+        Tk.__init__(self)
+        self._frame = None
+        self.switch_frame(StartPage)
+
+
+    def switch_frame(self, frame_class, optional=False):
+        if optional:
+            new_frame = frame_class(self, 2)
+        else:
+            new_frame = frame_class(self)
+        if self._frame is not None:
+            self._frame.destroy()
+        self._frame = new_frame
+        self._frame.grid()
+
+# Initialize Start Page
+class StartPage(Frame):
+    def __init__(self, master=None):
+        Frame.__init__(self, master)
+        self.master = master
+
+        self.title = Label(self, text="Home Page", width=10)
+        self.title.config(font=("Courier", 44))
+        self.title.grid(row=0, column=2,sticky="W")
+        self.first = Button(self, text='Update HR Log', command=lambda: master.switch_frame(HRLog))
+        self.first.grid(row=1, column=1, pady=(25,25), padx=(15,0),  sticky="NW" )
+
+        self.second = Button(self, width=10, text="Danford's Bill", command=lambda: master.switch_frame(DanfordBilling))
+        self.second.grid(row=1, column=3, pady=(25,50), padx=(0,15), sticky="NE")
+
+        self.third = Button(self, width=10, text='Hilton PDF', command=lambda: master.switch_frame(HiltonPDF))
+        self.third.grid(row=5, column=1, pady=80, padx=(15,0), sticky="W")
+
+        self.fourth = Button(self, width=10, text='Housing', command=lambda: master.switch_frame(HousingCrosscheck))
+        self.fourth.grid(row=5, column=3, pady=80,  padx=(0,15), sticky="E")
+
+        self.init_window()
+
+    def init_window(self):
+        self.master.title("Simons Center Helper")
+        self.grid()
+
+# Update HR Log with SBF report
+class HRLog(Frame):
+    def __init__(self, master):
+        Frame.__init__(self, master)
+
+        title = Label(self, text="Update HR Log")
+        title.config(font=("Courier", 28),height=1)
+
+        title.grid(sticky='N', padx=(15,0))
+
+        go_back = Button(self, text="Go Back", command=lambda: master.switch_frame(StartPage))
+        go_back.grid(row=4, column=0, pady=25, padx=(15,0), sticky ='W')
+
+        download_label = Label(self, text="Select SBF Report", justify=LEFT)
+        download_label.grid(row=2, column=0, padx=(15,0), pady=25, sticky='W')
+        new_directory = os.path.expanduser("~")
+
+        # Show file name
+        text = Text(self, state='disabled', width=50, height=1)
+        text.configure(state='normal')
+        text.insert('end', new_directory)
+        text.configure(state='disabled')
+        text.grid(row=2, column=4)
+        # Create necessary buttons
+        browse_button = Button(self, text="Browse", command=lambda: file_browser("Select SBF Report", text))
+        browse_button.grid(row=2, column=1, padx=(10, 15), pady=(15, 10))
+
+        go_label = Label(self, text="Start Program")
+        go_label.grid(row=3, column=0, padx=(15,0), sticky='W')
+
+        cont = Button(self, text="Update Log", command=lambda: updatesheet(opensheet(), text.get(1.0, END)))
+        cont.grid(row=3, column=1)
+
+        # Create function to browse and select files
+        def file_browser(msg, text):
+            new_directory = askopenfilename(title=msg)
+            text.configure(state='normal')
+            text.delete(1.0, 'end')
+            text.insert(1.0, new_directory)
+            text.configure(state='disabled')
+
+        # Open google sheets and select 'HR TVL LOG'
+        def opensheet():
+            creds = Spread('Update Log', "HR TVL Log")
+            return creds
+
+        # Cross reference with selected file, update paid and unpaid requisitions
+        def updatesheet(HR, sbffile):
+            HR.open_sheet('Unpaid')
+            sbffile = sbffile.strip('\n')
+            df = HR.sheet_to_df()
+            # Read in excel file
+            sbf = pd.read_excel(sbffile, skiprows=2)
+            df = df.reset_index().rename(columns={'index': 'Last Name', 'Item Description ': 'Item Description'})
+
+            # Get TVL number from Item Description column
+            df["TVL"] = df["Item Description"].str.split(" ", expand=True)[1]
+
+            # Find intersection of requisitions
+            inter = df[df['TVL'].isin(sbf['Requisition/CPV'])]
+            inter['Amount'] = pd.to_numeric(inter['Amount'])
+            HR.open_sheet('Paid')
+            paid = HR.sheet_to_df()
+            paid = paid.reset_index().rename(columns={'index': 'Last Name'})
+
+            both = pd.DataFrame()
+            one = pd.DataFrame()
+            two = pd.DataFrame()
+            three = pd.DataFrame()
+
+            # Make sure both the TVL number and amount match
+            one["TVL"] = inter['TVL']
+            one['Amount'] = inter['Amount']
+            one.reset_index().drop(columns='index')
+            two["TVL"] = sbf['Requisition/CPV']
+            two["Amount"] = sbf['Invoice Amount']
+            three = pd.merge(right=one, left=two, how='inner')
+            both = inter[inter["TVL"].isin(three['TVL'])]
+
+            # Update paid list with newly paid items
+            order = list(df)
+            newpaid = pd.concat([paid, both], axis=0, ignore_index=True).reindex(columns=order)
+            newunpaid = df[~df['TVL'].isin(inter['TVL'])]
+
+            # Find items where amounts don't not match
+            matchmis = inter[~inter['TVL'].isin(both["TVL"])]
+            matchmis = matchmis.reset_index().drop(columns='index')
+            HR.open_sheet('Amount mismatch')
+            toconcat = HR.sheet_to_df()
+            toconcat = toconcat.reset_index()
+            rang = []
+            for i in range(len(toconcat), len(toconcat) + len(matchmis), 1):
+                rang.append(i)
+            matchmis = matchmis.set_index(pd.Index(rang))
+            mismatch = pd.concat([toconcat, matchmis], axis=0, ignore_index=True).reindex(columns=order)
+
+            # Update Google Sheets Paid and Unpaid lists
+            Spread.df_to_sheet(HR, sheet="Paid", df=newpaid, replace=True, index=False)
+            Spread.df_to_sheet(HR, sheet="Unpaid", df=newunpaid, replace=True, index=False)
+
+            # Send newly paid items to Justpaid sheet
+            Spread.df_to_sheet(HR, sheet='Justpaid', df=both, replace=True, index=False)
+
+            # Send mismatch items to Amount mismatch sheet
+            Spread.df_to_sheet(HR, sheet='Amount mismatch', df=mismatch, replace=True, index=False)
+
+# Read Danford's Billing pdf
+class DanfordBilling(Frame):
+
+    def __init__(self, master):
+        Frame.__init__(self, master)
+
+        title = Label(self, text="Danford's Bill",height=1)
+        title.config(font=("Courier", 28))
+        title.grid(sticky='N',padx=(15,0))
+
+        go_back=Button(self, text="Go Back", command=lambda: master.switch_frame(StartPage))
+        go_back.grid(row=5,column=0, pady=25, padx=(15,0), sticky ='W')
+
+        download_label = Label(self, text="Select Danford's PDF", justify=LEFT)
+        download_label.grid(row=1, column=0, pady=25, padx=(15,0), sticky='W')
+        new_directory = os.path.expanduser("~")
+
+        # Show filename and add necessary buttons
+        text = Text(self, state='disabled', width=50, height=1)
+        text.configure(state='normal')
+        text.insert('end', new_directory)
+        text.configure(state='disabled')
+        text.grid(row=1, column=4)
+        browse_button = Button(self, text="Browse", command=lambda: file_browser("Select Danford's PDF", text))
+        browse_button.grid(row=1, column=2, padx=(10, 15), pady=(15, 10))
+
+        download_label2 = Label(self, text="Select Workshop Report", justify=LEFT)
+        download_label2.grid(row=2, column=0, pady=25, padx=(15,0), sticky='W')
+        new_directory2 = os.path.expanduser("~")
+
+        # Show filename and add necessary buttons
+        text2 = Text(self, state='disabled', width=50, height=1)
+        text2.configure(state='normal')
+        text2.insert('end', new_directory2)
+        text2.configure(state='disabled')
+        text2.grid(row=2, column=4)
+        browse_button2 = Button(self, text="Browse", command=lambda: file_browser("Select Workshop Report", text2))
+        browse_button2.grid(row=2, column=2, padx=(10, 15), pady=(15, 10))
+
+        download_label3 = Label(self, text="Select Program Report\nif applicable", justify=LEFT)
+        download_label3.grid(row=3, column=0, pady=25, padx=(15, 0), sticky='W')
+        new_directory3 = os.path.expanduser("~")
+
+        # Show filename and add necessary buttons
+        text3 = Text(self, state='disabled', width=50, height=1)
+        text3.configure(state='normal')
+        text3.insert('end', new_directory3)
+        text3.configure(state='disabled')
+        text3.grid(row=3, column=4)
+        browse_button3 = Button(self, text="Browse", command=lambda: file_browser("Select Program Report", text3))
+        browse_button3.grid(row=3, column=2, padx=(10, 15), pady=(15, 10))
+
+
+        go_label = Label(self, text="Start Program")
+        go_label.grid(row=4, column=0, pady=25, padx=(15,0), sticky= 'W')
+
+        cont = Button(self, text="Read & Crosscheck", command=lambda: readpdf(text.get(1.0, END),text2.get(1.0, END),text3.get(1.0,END)))
+        cont.grid(row=4, column=2, pady=25)
+
+        def readpdf(pdfpath,mdpath,mdpath2):
+
+            pdfpath = pdfpath.strip('\n')
+            mdpath = mdpath.strip('\n')
+            mdpath2 = mdpath2.strip('\n')
+            # Read file
+            soup = textract.process(pdfpath, method='tesseract', language='eng')
+            string = str(soup)
+            # Search for names in between date and some other words
+            maybe = re.findall('[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9]* Room Charge.*?Of Room', string)
+            dates = []
+            names = []
+            for i in range(0, len(maybe), 1):
+                datesearch = re.findall("[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9]*", maybe[i])
+                namesearch = re.findall('(?<=From )(.*)(?= Of)', maybe[i])
+
+                for k in range(0, len(datesearch), 1):
+                    ind = datesearch[k].split(' ')
+                dates.append(ind[0])
+                names.append(namesearch)
+            # Make dataframe with all names (not unique)
+            fin = pd.DataFrame(columns=['Names', 'date_arrival', 'date_departure-1'])
+            fin['Names'] = names
+
+            # Find first and last instance of each name, retrieve start and end dates
+            # with those indices
+            def findI(lst, string):
+                indices = [i for i, x in enumerate(lst) if x == string]
+                start = min(indices)
+                end = max(indices)
+                return start, end
+
+            for i in range(0, len(fin), 1):
+                index = findI(names, names[i])
+                fin.at[i, 'date_arrival'] = dates[min(index)]
+                fin.at[i, 'date_departure-1'] = dates[max(index)]
+
+            # Store dates and unique names in dataframe, save to desktop
+            result = fin.loc[fin.astype(str).drop_duplicates().index]
+            result = result.reset_index().drop(columns='index')
+            result['Names'] = result['Names'].astype(str).str.strip("['']")
+
+            adate = pd.to_datetime(result['date_arrival'], format='%m-%d-%y')
+            ddate = pd.to_datetime(result['date_departure-1'], format='%m-%d-%y')
+
+            result['date_departure'] = ddate.apply(pd.DateOffset(days=1))
+            result['date_departure'] = result['date_departure'].dt.strftime("%Y-%m-%d")
+            result = result.drop(columns='date_departure-1')
+
+            result['date_arrival'] = adate.dt.strftime("%Y-%m-%d")
+
+            workshop = pd.read_excel(mdpath)
+            workshop = workshop[['last_name', 'first_name', 'date_arrival', 'date_departure', 'code_dwelling']]
+
+            try:
+
+                program = pd.read_excel(mdpath2)
+                program = program.iloc[1:]
+                program = program[['last_name', 'first_name', 'date_arrival', 'date_departure', 'code_dwelling']]
+                workshop['type'] = 'Workshop'
+                program['type'] = 'Program'
+                incoming = pd.concat([workshop, program], axis=0)
+
+            except:
+                incoming = workshop
+                pass
+
+            incoming = incoming.iloc[1:]
+
+            adate2 = pd.to_datetime(incoming['date_arrival'], yearfirst=True)
+            ddate2 = pd.to_datetime(incoming['date_departure'], yearfirst=True)
+            incoming['date_arrival'] = adate2.dt.strftime("%Y-%m-%d")
+            incoming['date_departure'] = ddate2.dt.strftime("%Y-%m-%d")
+
+            incoming.dropna(inplace=True)
+            incoming = incoming[incoming['code_dwelling'].str.contains("DANFORDS")]
+
+            incoming['Names'] = incoming['last_name'] + ' ' + incoming['first_name']
+
+            tomerge = incoming.reset_index().drop(columns=['code_dwelling', 'last_name', 'first_name', 'index'])
+
+            result['Names'] = result['Names'].str.lower()
+            tomerge['Names'] = tomerge['Names'].str.lower()
+
+            fin = pd.merge(right=tomerge, left=result, how='inner', on=['Names', 'date_arrival', 'date_departure'])
+            notin = result[~result['Names'].isin(fin['Names'])]
+
+            out_path = str(Path.home()) + "/desktop/Apps4Melissa/Danford_Crosscheck.xlsx"
+            writer = pd.ExcelWriter(out_path, engine='xlsxwriter')
+            notin.to_excel(writer, sheet_name='Not_Matched')
+            fin.to_excel(writer, sheet_name='Matched')
+            writer.save()
+
+        # Function to browse and select files
+        def file_browser(msg, text):
+            new_directory = askopenfilename(title=msg)
+            text.configure(state='normal')
+            text.delete(1.0, 'end')
+            text.insert(1.0, new_directory)
+            text.configure(state='disabled')
+
+# Crosscheck Hilton PDF with Mayday Event Report
+class HiltonPDF(Frame):
+    def __init__(self,master):
+        Frame.__init__(self,master)
+
+        title = Label(self, text="Crosscheck PDF", height=1)
+        title.config(font=("Courier", 28))
+        title.grid(sticky='N')
+
+        download_label = Label(self, text="Select Hilton PDF", justify=LEFT, height=5)
+        download_label.grid(row=1, column=0, sticky='W', padx=(15,0))
+        new_directory = os.path.expanduser("~")
+
+        browse_button = Button(self, text="Browse", command=lambda: file_browser("Select Hilton PDF", text))
+        browse_button.grid(row=1, column=2, padx=(10, 15), pady=(15, 10))
+
+        text = Text(self, state='disabled', width=50, height=1)
+        text.configure(state='normal')
+        text.insert('end', new_directory)
+        text.configure(state='disabled')
+        text.grid(row=1, column=4)
+
+        download_label2 = Label(self, text="Select Mayday Workshop Report", justify=LEFT)
+        download_label2.grid(row=2, column=0, padx=(15,0), pady=25, sticky='W')
+        new_directory2 = os.path.expanduser("~")
+
+        browse_button2 = Button(self, text="Browse", command=lambda: file_browser("Select Event Report", text2))
+        browse_button2.grid(row=2, column=2, padx=(10, 15), pady=(15, 10))
+
+        text2 = Text(self, state='disabled', width=50, height=1)
+        text2.configure(state='normal')
+        text2.insert('end', new_directory2)
+        text2.configure(state='disabled')
+        text2.grid(row=2, column=4)
+
+        download_label3 = Label(self, text="Select Mayday Program Report\n(if applicable)", justify=LEFT)
+        download_label3.grid(row=3, column=0, padx=(15, 0), pady=25, sticky='W')
+        new_directory3 = os.path.expanduser("~")
+
+        browse_button3 = Button(self, text="Browse", command=lambda: file_browser("Select 2nd Event Report from Mayday \n if applicaple", text3))
+        browse_button3.grid(row=3, column=2, padx=(10, 15), pady=(15, 10))
+
+        text3 = Text(self, state='disabled', width=50, height=1)
+        text3.configure(state='normal')
+        text3.insert('end', new_directory3)
+        text3.configure(state='disabled')
+        text3.grid(row=3, column=4)
+
+        go_label = Label(self, text="Start Program")
+        go_label.grid(row=4, column=0, padx=(15,0), sticky='W')
+
+        start = Button(self, text="Read & Crosscheck", command=lambda: crosscheck(text.get(1.0, END),text2.get(1.0, END),text3.get(1.0,END)))
+        start.grid(row=4, column=2, pady=25)
+
+        go_back = Button(self, text="Go Back", command=lambda: master.switch_frame(StartPage))
+        go_back.grid(row=5, column=0, pady=25, padx=(15,0), sticky='W')
+
+
+        def crosscheck(pdfpath,eventpath,eventpath2):
+            pdfpath = pdfpath.strip('\n')
+            eventpath = eventpath.strip('\n')
+            eventpath2 = eventpath2.strip('\n')
+
+            text = textract.process(pdfpath, method='tesseract', language='eng')
+            string = str(text)
+            string = string.replace("\\n", " ")
+
+            search = re.findall("Confirmation Number: .*?BALANCE", string)
+
+            name = []
+            dates = []
+            startdate = []
+            enddate = []
+            firstname = []
+            lastname = []
+
+            for i in range(0, len(search)):
+                current = search[i]
+                name.append(re.findall("\S+,\s\S+\s", current))
+                dates.append(re.findall('[0-9]+/[0-9]+/[0-9]+', current)[1:])
+
+            for i in range(0, len(name)):
+                startdate.append(str(dates[i][0]).replace('/', '-'))
+                enddate.append(str(dates[i][-1]).replace('/', '-'))
+                first = str(name[i][0].split(',')[1]).strip(' ')
+                last = str(name[i][0].split(',')[0]).strip(' ')
+                firstname.append(first.lower())
+                lastname.append(last.lower())
+
+            result = pd.DataFrame(columns=["last_name", "first_name", "date_arrival", "date_departure"])
+
+            result["first_name"] = firstname
+            result['last_name'] = lastname
+            result['Names'] = result['first_name'] + ' ' + result['last_name']
+            result.drop(columns=['first_name', 'last_name'], inplace=True)
+
+            result['date_arrival'] = startdate
+            result['date_departure'] = enddate
+
+            adate = pd.to_datetime(result['date_arrival'], format='%m-%d-%Y')
+            ddate = pd.to_datetime(result['date_departure'], format='%m-%d-%Y')
+
+            # result['date_departure'] = ddate.apply(pd.DateOffset(days=1))
+            # result = result.drop(columns='date_departure-1')
+
+            result['date_departure'] = ddate.dt.strftime("%Y-%m-%d")
+            result['date_arrival'] = adate.dt.strftime("%Y-%m-%d")
+
+            workshop = pd.read_excel(eventpath)
+            workshop = workshop[['last_name', 'first_name', 'date_arrival', 'date_departure', 'code_dwelling']]
+
+            try:
+
+                program = pd.read_excel(eventpath2)
+                program = program.iloc[1:]
+                program = program[['last_name', 'first_name', 'date_arrival', 'date_departure', 'code_dwelling']]
+                workshop['type'] = 'Workshop'
+                program['type'] = 'Program'
+                incoming = pd.concat([workshop, program], axis=0)
+
+            except:
+                incoming = workshop
+                pass
+
+            incoming = incoming.iloc[1:]
+
+            incoming['last_name'] = incoming['last_name'].str.lower()
+            incoming['first_name'] = incoming['first_name'].str.lower()
+            incoming['Names'] = incoming['first_name'] + ' ' + incoming['last_name']
+
+            adate2 = pd.to_datetime(incoming['date_arrival'], yearfirst=True)
+            ddate2 = pd.to_datetime(incoming['date_departure'], yearfirst=True)
+            incoming['date_arrival'] = adate2.dt.strftime("%Y-%m-%d")
+            incoming['date_departure'] = ddate2.dt.strftime("%Y-%m-%d")
+
+            incoming.dropna(inplace=True)
+            incoming = incoming[incoming['code_dwelling'].str.contains('HIL')]
+
+            tomerge = incoming.reset_index().drop(columns=['code_dwelling', 'last_name', 'first_name', 'index'])
+
+            merge = pd.merge(left=tomerge, right=result, how='inner', on=['Names', 'date_arrival', 'date_departure'])
+            notin = result[~result['Names'].isin(merge['Names'])]
+
+            out_path = str(Path.home()) + "/desktop/Apps4Melissa/Hilton_PDF_Crosscheck.xlsx"
+            writer = pd.ExcelWriter(out_path, engine='xlsxwriter')
+            notin.to_excel(writer, sheet_name='Not_Matched')
+            merge.to_excel(writer, sheet_name='Matched')
+
+            writer.save()
+
+        def file_browser(msg, text):
+            new_directory = askopenfilename(title=msg)
+            text.configure(state='normal')
+            text.delete(1.0, 'end')
+            text.insert(1.0, new_directory)
+            text.configure(state='disabled')
+
+
+class HousingCrosscheck(Frame):
+    def __init__(self,master):
+        Frame.__init__(self,master)
+
+        title = Label(self, text="Crosscheck Housing", height=1)
+        title.config(font=("Courier", 28))
+        title.grid(sticky='N', padx=(15,0))
+
+        download_label = Label(self, text="Select Mayday Report", justify=LEFT)
+        download_label.grid(row=1, column=0, pady=25, padx=(15,0), sticky='W')
+        new_directory = os.path.expanduser("~")
+
+        browse_button = Button(self, text="Browse", command=lambda: file_browser("Select Mayday Report", text))
+        browse_button.grid(row=1, column=2, padx=(10, 15), pady=(10, 10))
+
+        text = Text(self, state='disabled', width=50, height=1)
+        text.configure(state='normal')
+        text.insert('end', new_directory)
+        text.configure(state='disabled')
+        text.grid(row=1, column=4)
+
+        download_label2 = Label(self, text="Select Danford sheet", justify=LEFT)
+        download_label2.grid(row=2, column=0, pady=25, padx=(15,0), sticky='W')
+        new_directory2 = os.path.expanduser("~")
+
+        browse_button2 = Button(self, text="Browse", command=lambda: file_browser("Select Danford Sheet", text2))
+        browse_button2.grid(row=2, column=2, padx=(10, 15), pady=(10, 10))
+
+        text2 = Text(self, state='disabled', width=50, height=1)
+        text2.configure(state='normal')
+        text2.insert('end', new_directory2)
+        text2.configure(state='disabled')
+        text2.grid(row=2, column=4)
+
+        download_label3 = Label(self, text="Select Hilton sheet", justify=LEFT)
+        download_label3.grid(row=3, column=0, pady=25, padx=(15,0), sticky='W')
+        new_directory3 = os.path.expanduser("~")
+
+        browse_button3 = Button(self, text="Browse", command=lambda: file_browser("Select Hilton Sheet", text3))
+        browse_button3.grid(row=3, column=2, padx=(10, 15), pady=(10, 10))
+
+        text3 = Text(self, state='disabled', width=50, height=1)
+        text3.configure(state='normal')
+        text3.insert('end', new_directory3)
+        text3.configure(state='disabled')
+        text3.grid(row=3, column=4)
+
+        go_label = Label(self, text="Start Program", pady=25)
+        go_label.grid(row=4, column=0, padx=(15,0), sticky='W')
+
+        start = Button(self, text="Crosscheck", pady=25,
+                       command=lambda: crosssheet(text.get(1.0, END), text2.get(1.0, END), text3.get(1.0, END)))
+        start.grid(row=4, column=2)
+
+        go_back = Button(self, text="Go Back", command=lambda: master.switch_frame(StartPage))
+        go_back.grid(row=5, column=0, pady=25, padx=(15,0), sticky='W')
+
+        def file_browser(msg, text):
+            new_directory = askopenfilename(title=msg)
+            text.configure(state='normal')
+            text.delete(1.0, 'end')
+            text.insert(1.0, new_directory)
+            text.configure(state='disabled')
+
+        def crosssheet(mdpath,danpath,hilpath):
+            import pandas as pd
+
+            mdpath = mdpath.strip('\n')
+
+            md = pd.read_excel(mdpath, header=None, skiprows=3)
+            md = md.loc[:, [3, 4, 5, 6, 7, 24]].rename(
+                columns={3: 'visit id', 4: 'last_name', 5: 'first_name', 6: 'date_arrival', 7: 'date_departure',
+                         24: 'dwelling'})
+            md['first_name'] = md['first_name'].str.lower()
+            md['last_name'] = md['last_name'].str.lower()
+
+            try:
+                danpath = danpath.strip('\n')
+                dan = pd.read_excel(danpath, skiprows=4, header=None)
+                dan = dan.loc[:, [1, 2, 3, 4, 9, 10, 16]].rename(
+                    columns={1: 'last_name', 2: 'first_name', 3: 'date_arrival', 4: 'date_departure', 9: 'shared_first',
+                             10: 'shared_last', 16: 'visit id'})
+                dan['first_name'] = dan['first_name'].str.lower()
+                dan['last_name'] = dan['last_name'].str.lower()
+
+                md.dropna(inplace=True)
+                mddan = md[md['dwelling'].str.contains('DAN')]
+                matchdan = md[md['visit id'].isin(mddan['visit id'])]
+                matchmd1 = dan[dan['visit id'].isin(md['visit id'])]
+                tomerge1 = matchmd1
+                right1 = matchdan
+
+            except:
+                hilpath = hilpath.strip('\n')
+                hil = pd.read_excel(hilpath, header=None, skiprows=1)
+                hil = hil.loc[:, [3, 4, 5, 6, 7]].rename(
+                    columns={3: 'visit id', 4: 'last_name', 5: 'first_name', 6: 'date_arrival', 7: 'date_departure'})
+                hil['first_name'] = hil['first_name'].str.lower()
+                hil['last_name'] = hil['last_name'].str.lower()
+
+                md.dropna(inplace=True)
+                mdhilton = md[md['dwelling'].str.contains('HIL')]
+                matchhil = md[md['visit id'].isin(mdhilton['visit id'])].drop(columns='dwelling')
+                matchmd2 = hil[hil['visit id'].isin(md['visit id'])]
+                tomerge1 = matchmd2
+                right1 = matchhil
+
+            merged = tomerge1.merge(right1, how='inner',
+                                    on=['visit id', 'last_name', 'first_name', 'date_arrival', 'date_departure'])
+
+            notin = tomerge1[~tomerge1['visit id'].isin(merged['visit id'])]
+            notin.dropna(how='all')
+
+            adate = pd.to_datetime(notin['date_arrival'], format='%Y-%m-%d')
+            ddate = pd.to_datetime(notin['date_departure'], format='%Y-%m-%d')
+
+            notin['date_arrival'] = adate.dt.strftime("%Y-%m-%d")
+            notin['date_arrival'] = adate.dt.strftime("%Y-%m-%d")
+
+            out_path = str(Path.home()) + "/desktop/Apps4Melissa/Housing_Crosscheck.xlsx"
+            writer = pd.ExcelWriter(out_path, engine='xlsxwriter')
+            notin.to_excel(writer)
+            writer.save()
+
+if __name__ == "__main__":
+    app = SampleApp()
+    app.geometry("700x425")
+    app.mainloop()
