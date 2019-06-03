@@ -1,0 +1,296 @@
+
+import pandas as pd
+import selenium
+from selenium import webdriver
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver import ActionChains
+import re
+import pyperclip
+import time
+from dateutil.parser import parse
+
+read_in=pd.read_excel('downloads/workbook2.xlsx',skiprows=1)
+read_in.head()
+names=pd.DataFrame()
+names['last name']=read_in['last_name'].dropna()
+names['first name']=read_in['first_name'].dropna()
+names=names.reset_index().drop(columns='index')
+names=names[0:10]
+
+read_in=pd.read_excel('downloads/workbook1.xlsx')
+
+# Set date parameters 
+fromdate='2018-08-26'
+todate='2019-02-12'
+
+# Initialize variables
+acknoby=[]
+doi=[]
+pardate=[]
+additonly=[]
+numb=[]
+title=[]
+subject=[]
+parsed=[]
+ssum=[]
+event=[]
+pub=[]
+
+# Initialise dataframe
+formay=pd.DataFrame(columns=['Acknowledged by (in list only)','Title','Subject','Date Submitted'
+                             ,'Additional Authors','arXiv number','DOI number','Publication Type'
+                             ,'Event','Abstract','Pulled Acknowledgement'])
+# Start chromedriver
+driver=webdriver.Chrome('Desktop/eddysapps/chromedriver')
+
+linkcount=0
+for big in range(0,len(names)):
+    # Go to arXiv advanced search
+    driver.get("https://arxiv.org/search/advanced")
+    
+    # Type in author's name
+    driver.find_element_by_xpath('//input[@id="terms-0-term"]').send_keys(names.loc[big][1]+' '+names.loc[big][0])
+    
+    # Search for Authors with date parameters, return 200 results per page
+    def search(fromdate,todate):
+        driver.find_element_by_xpath("//select[@id='terms-0-field']/option[text()='Author(s)']").click()
+        driver.find_element_by_xpath("//input[@id='date-filter_by-3']").click()
+        driver.find_element_by_xpath("//input[@id='date-from_date']").send_keys(fromdate)
+        driver.find_element_by_xpath("//input[@id='date-to_date']").send_keys(todate)
+        driver.find_element_by_xpath("//select[@id='size']/option[text()='200']").click()
+        driver.find_element_by_xpath("//button[@class='button is-link is-medium']").click()
+    search(fromdate,todate)
+
+    # Try and find correct author, select author page
+    allauths=driver.find_elements_by_xpath("//p[@class='authors']")
+    allauths=[i.text.replace('Authors: ','')for i in allauths]
+    
+    splitauth=str(allauths).split(', ')
+    match1=[]
+    for i in splitauth:
+        thesearch=re.search(".?"+names.loc[big][1]+'.*?'+names.loc[big][0]+".?",i)
+        if thesearch!=None:
+            match1.append(thesearch)
+    if len(match1)==0:
+        continue
+    
+    authormatches=driver.find_elements_by_xpath("//a[contains(text(),'"+match1[0].group().strip("''")+"')]")
+    
+    # First match is query, select next one 
+    try:
+        authormatches[1].click()
+    except:
+        continue
+    # Get author value (John Doe -> J, Doe ) search with value
+    searchthis=driver.find_element_by_xpath("//input[@class='input is-medium']").get_attribute("value")
+    driver.find_element_by_xpath("//a[contains(text(),'Advanced Search')]").click()
+    driver.find_element_by_xpath('//input[@id="terms-0-term"]').send_keys(searchthis)
+    search(fromdate,todate)
+    
+    # Find all links to papers
+    arxivs=driver.find_elements_by_xpath("//a[@href]")
+    links=[i.text for i in arxivs]
+    indices = [i for i,s in enumerate(links) if 'arXiv:' in s]
+    
+    # Function to get unique items from list
+    def unique(lst):
+        sset = set()
+        for x in lst:
+            sset.add(x)
+        unilst=list(sset)
+        return unilst
+
+    # Store URL to correctly cycle through links
+    authurl=driver.current_url
+    linkcount=0
+    for small in range(0,len(indices),1):
+        linkcount+=1
+        print(linkcount)
+        arxivs=driver.find_elements_by_xpath("//a[@href]")
+        links=[i.text for i in arxivs]
+        
+        indices = [i for i,s in enumerate(links) if 'arXiv:' in s]
+        lnk=arxivs[indices[small]]
+        
+        # Get arXiv number
+        topull=lnk.text
+        save1=re.findall('[0-9]*\.[0-9]*',topull)[0]
+        lnk.click()
+        
+        # Get subject, authors, date, abstract, title
+        save2=driver.find_element_by_xpath("//span[@class='primary-subject']").text.split(' ')[-1].strip('()')
+        
+        authors=driver.find_element_by_xpath("//div[@class='authors']").text
+        date=' '.join(driver.find_element_by_xpath("//div[@class='dateline']").text.split(' ')[2:5])    
+        
+        abstract=driver.find_element_by_xpath("//blockquote[@class='abstract mathjax']")
+        save5=abstract.text.replace('\n',' ')
+        
+        save3=driver.find_element_by_xpath("//h1[@class='title mathjax']").text.replace('\n',' ')
+        
+        # Get DOI number if exists
+        allhrefs=driver.find_elements_by_xpath("//a[@href]")
+        totext=[i.text for i in allhrefs]
+        save4=''
+        for i in range(0,len(totext)):
+            temp1=re.search('\d{2}\.\d{4}/.+',totext[i])
+            try:
+                save4=temp1.group()
+            except:
+                continue
+            
+        # Try to find journal reference, if not found, article is type 'Paper' not 'Journal'.
+        try:
+            journal=driver.find_element_by_xpath("//td[contains(text(),'Journal')]")
+            save6='Journal'
+        except:
+            save6='Paper'
+        
+        # Parse dates
+        datetime=parse(date.strip(')'),fuzzy=True, dayfirst=True)
+        save7=datetime.strftime('%Y-%m-%d')
+        
+        # Open PDF file of paper, paste in text file and read text file.
+        pyperclip.copy('in progress')
+        file=open('desktop/school/simons/current.txt','w')
+        file.write(pyperclip.paste())
+        file.close()
+        file1=open('desktop/school/simons/current.txt','r')
+        text=file1.read()
+        file1.close()
+        
+        try:
+            pdf=driver.find_element_by_xpath("//a[contains(text(),'PDF')]").click()
+        except:
+            continue
+        
+        while True:
+            
+            time.sleep(1)
+
+            elem=driver.find_element_by_xpath("//embed[@id='plugin']")
+            elem.click()
+            ActionChains(driver).key_down(Keys.COMMAND).send_keys('a').key_up(Keys.COMMAND).perform()
+            ActionChains(driver).key_down(Keys.COMMAND).send_keys('c').key_up(Keys.COMMAND).perform()
+            time.sleep(1)
+            
+            file2=open('desktop/school/simons/current.txt','w')
+            file2.write(pyperclip.paste())
+            file2.close()
+            file3=open('desktop/school/simons/current.txt','r')
+            text=file3.read()
+            file3.close()
+            if text!='in progress':
+                break
+            
+            count+=1
+        
+        # Select everything past first page to avoid useless matches (authors may be from Simons Center) only 
+        #acknowledgment is important
+        text=text[1500::]
+
+        #Find Simons Center related words, 
+        one=re.findall('[Ss]imons[\s|\n][Cc]enter',text)
+        two=re.findall('[Ss]imons[\s|\n][Ww]orkshop',text)
+        
+        three=re.findall('[Ss]tony[\s|\n][Bb]rook',text)
+        four=re.findall('[Gg]eometry[\s|\n]and[\s\n][Pp]hyiscs',text)
+        five=re.findall('[Mm]ath[a-z]*[\s|\n]and[\s\n][Pp]hysics',text)
+        allsearch=one+two+three+four+five
+        
+        workshop=re.findall('^((?![Ss]imons).)*$[\s|\n][Ww]orkshop',text)
+        program=re.findall('^((?![Ss]imons).)*$[\s|\n][Pp]rogram',text)
+        
+        # If there are no matches, go back to author page and try next link
+        try:
+            match=text.index(allsearch[0])
+        except:
+            driver.get(authurl)
+            continue
+        
+        #Pull text 2 lines before and after first match     
+        onehalf=text[:match]
+        twohalf=text[match:]
+
+        before=re.findall('.*\n.*',onehalf[::-1])
+        after=re.findall('.*\n.*',twohalf)
+        aft=','.join(after[0:2])
+
+        bef=",".join(before[0:2])[::-1]
+        ssum.append(bef+aft) 
+        
+        #Search for initials in acknowledgment text
+        init=re.findall('[A-Z]\.?[A-Z]\.?[A-Z]?',bef+aft)
+        uniq=unique(init)
+        
+        #Get initials from authors of paper
+        ainit=[]
+        separate=authors.split(', ')
+        namsep=[]
+        for i in range(0,len(separate),1):
+            indi=separate[i].split(' ')
+            namsep.append(indi)
+
+            tot=str()
+            for j in range(0,len(indi),1): 
+                temp=indi[j][0]
+                tot=tot+temp
+            ainit.append(tot)
+        
+        #Try and match initials in acknowledgment text to initials of authors, if they match return full name.
+        clean=[]
+        found=[]
+        for i in range(0,len(uniq)):
+            clean.append(uniq[i].replace('.',''))
+            for j in range(0,len(ainit)):
+                if clean[i]==ainit[j]:
+                    found.append(clean[i])
+        og=[]
+        fullname=names['first name']+' '+names["last name"]
+        for i in range(0,len(found)):
+            for j in range(0,len(namsep)):
+                try:
+                    if found[i][0] is namsep[j][0][0] and found[i][-1] is namsep[j][-1][0]:
+                        og.append(namsep[j][0]+' '+namsep[j][-1])
+                except:
+                    og=[]
+        save8=[]
+        for i in range(0,len(namsep)):
+            for j in range(0,len(found)):
+                if found[j][0] is namsep[i][0][0] and found[j][-1] is namsep[i][1][0]:
+                    full=str()
+                    for k in range(0,len(namsep[i])):
+                        full+=(namsep[i][k]+' ')
+                    save8.append(full.strip(" "))
+        save9=[i for i in separate if i not in fullname.loc[big]]
+        
+        #Append all relevant information to lists
+        if len(allsearch)>=1:
+            numb.append(save1) 
+            subject.append(save2) 
+            title.append(save3)
+            
+            doi.append(save4)
+            
+            parsed.append(save5) 
+            pub.append(save6)
+            pardate.append(save7)
+            acknoby.append(save8)
+            additonly.append(save9)
+            
+        if workshop!=None:
+            event.append(workshop)
+        elif program!=None:
+            event.append(program)
+        else:
+            event.append('')
+            
+        # Return to author page 
+        driver.get(authurl)
+        
+# Append all lists to dataframe
+for i in range(0,len(title)):
+    formay=formay.append({'Acknowledged by (in list only)':acknoby[i],'Title':title[i],'Subject':subject[i]
+                          ,'Date Submitted':pardate[i],'Additional Authors':additonly[i],'arXiv number':numb[i]
+                          ,'DOI number':doi[i],'Publication Type':pub[i],'Event':'','Abstract':parsed[i]
+                          ,'Pulled Acknowledgement':ssum[i]},ignore_index=True)
